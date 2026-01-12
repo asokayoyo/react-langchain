@@ -1,14 +1,10 @@
-"""This project for diving deep in to the react agent. How it works and how to extend it."""
+"""This project for diving deep in to tool binding with LLMs."""
 
 from callbacks import AgentCallbackHandler
-from langchain_classic.agents.format_scratchpad.log import format_log_to_str
 from dotenv import load_dotenv
-from langchain_classic.agents.output_parsers import ReActSingleInputOutputParser
-from langchain_classic.schema import AgentAction, AgentFinish
-from langchain_core.prompts.prompt import PromptTemplate
-from langchain_core.tools import render_text_description, Tool, tool
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
-from typing import Union
 
 load_dotenv()
 
@@ -21,78 +17,64 @@ def text_length_tool(text: str) -> int:
     return len(text.strip("\n").strip('"'))
 
 
-def find_tool_by_name(tools, name: str) -> Tool:
-    """Find a tool by its name from a list of tools."""
-    for t in tools:
-        if t.name == name:
-            return t
-    raise ValueError(f"Tool with name {name} not found.")
-
-
 def main():
     """Main module for react-langchain application."""
-    print("Hello from react-langchain!")
+    print("Hello from react-langchain with .bind_tools()!")
 
     tools = [text_length_tool]
-    template = """
-                Answer the following questions as best you can. You have access to the following tools:
 
-                {tools}
-
-                Use the following format:
-
-                Question: the input question you must answer
-                Thought: you should always think about what to do
-                Action: the action to take, should be one of [{tool_names}]
-                Action Input: the input to the action
-                Observation: the result of the action
-                ... (this Thought/Action/Action Input/Observation can repeat N times)
-                Thought: I now know the final answer
-                Final Answer: the final answer to the original input question
-
-                Begin!
-
-                Question: {input}
-                Thought: {agent_scratchpad}
-                """
-    prompt = PromptTemplate(template=template).partial(
-        tools=render_text_description(tools),
-        tool_names=", ".join([tool.name for tool in tools]),
-    )
+    # Create LLM and bind tools to it
     llm = ChatOpenAI(
         temperature=0,
-        stop=["\nObservation", "Observation:", "Observation"],
         callbacks=[AgentCallbackHandler()],
     )
-    intermediate_steps = []
-    input_extraction = {
-        "input": lambda x: x["input"],
-        "agent_scratchpad": lambda x: format_log_to_str(x["agent_scratchpad"]),
-    }
-    agent = input_extraction | prompt | llm | ReActSingleInputOutputParser()
+    llm_with_tools = llm.bind_tools(tools)
 
-    agent_step: Union[AgentAction, AgentFinish] = None
-    while not isinstance(agent_step, AgentFinish):
-        agent_step = agent.invoke(
-            {
-                "input": "What is the length in characters of the text CAT ?",
-                "agent_scratchpad": intermediate_steps,
-            }
-        )
-        print("Agent Result:")
-        print(agent_step)
+    # Message history for conversation
+    messages = [
+        HumanMessage(content="What is the length in characters of the text CAT ?")
+    ]
 
-        if isinstance(agent_step, AgentAction):
-            tool_name = agent_step.tool
-            print(f"Tool used: {tool_name}")
-            tool_to_use = find_tool_by_name(tools, tool_name)
-            tool_input = agent_step.tool_input
-            observation = tool_to_use.func(str(tool_input))
-            print(f"Tool Observation: {observation:}")
-            intermediate_steps.append((agent_step, str(observation)))
+    # Agent loop
+    max_iterations = 10
+    iteration = 0
 
-    print("Final Answer:")
-    print(agent_step.return_values["output"])
+    while iteration < max_iterations:
+        iteration += 1
+        print(f"\n--- Iteration {iteration} ---")
+
+        # Get response from LLM
+        response = llm_with_tools.invoke(messages)
+        print(f"AI Response: {response}")
+        messages.append(response)
+
+        # Check if there are tool calls
+        if not response.tool_calls:
+            # No tool calls means we have a final answer
+            print("\n=== Final Answer ===")
+            print(response.content)
+            break
+
+        # Execute tool calls
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
+
+            print(f"\nTool Call: {tool_name}")
+            print(f"Tool Args: {tool_args}")
+
+            # Find and execute the tool
+            selected_tool = {tool.name: tool for tool in tools}[tool_name]
+            tool_output = selected_tool.invoke(tool_args)
+
+            print(f"Tool Output: {tool_output}")
+
+            # Add tool message to history
+            messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_id))
+
+    if iteration >= max_iterations:
+        print(f"\nReached max iterations ({max_iterations})")
 
 
 if __name__ == "__main__":
